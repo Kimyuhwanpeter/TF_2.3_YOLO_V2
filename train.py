@@ -2,9 +2,10 @@
 from random import shuffle
 from absl import flags
 from model import *
+from keras_radam.training import RAdamOptimizer
 
-import tensorflow as tf
-import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import os
 import sys
 
@@ -20,7 +21,7 @@ flags.DEFINE_integer("batch_size", 10, "Batch size")
 
 flags.DEFINE_integer("num_classes", 20, "Number of classes")
 
-flags.DEFINE_integer("epochs", 100, "Total epochs")
+flags.DEFINE_integer("epochs", 1000, "Total epochs")
 
 flags.DEFINE_bool("train", True, "True or False")
 
@@ -33,8 +34,11 @@ FLAGS(sys.argv)
 
 ANCHORS = [0.57273, 0.677385, 1.87446, 2.06253, 3.33843, 5.47434, 7.88282, 3.52778, 9.77052, 9.16828]
 ANCHORS = np.array(ANCHORS)
-ANCHORS = ANCHORS.reshape(len(ANCHORS) // 2, 2)
-optim = tf.keras.optimizers.Adam(1e-5)
+
+ANCHORS_box = ANCHORS.reshape(len(ANCHORS) // 2, 2)
+ANCHORS = np.reshape(ANCHORS, [1,1,1,5,2])
+
+optim = RAdamOptimizer(1e-5)
 
 def func_(image, label):
 
@@ -67,7 +71,7 @@ def read_label(file, batch_size):
             line = f.readline()
             if not line: break
             line = line.split('\n')[0]
-
+            # 이 부분을 고쳐야 하나?
             xmin = int(int(line.split(',')[0]))
             xmax = int(int(line.split(',')[2]))
             ymin = int(int(line.split(',')[1]))
@@ -100,8 +104,8 @@ def read_label(file, batch_size):
                 best_box = 0
                 best_anchor = 0
                 for i in range(anchor_count):
-                    intersect = np.minimum(width_cell, ANCHORS[i, 0]) * np.minimum(height_cell, ANCHORS[i, 1])
-                    union = ANCHORS[i, 0] * ANCHORS[i, 1] + (width_cell * height_cell) - intersect
+                    intersect = np.minimum(width_cell, ANCHORS_box[i, 0]) * np.minimum(height_cell, ANCHORS_box[i, 1])
+                    union = ANCHORS_box[i, 0] * ANCHORS_box[i, 1] + (width_cell * height_cell) - intersect
                     iou = intersect / union
                     if iou > best_box:
                         best_box = iou
@@ -170,67 +174,149 @@ def run_model(model, images, training=True):
     return model(images, training=training)
 
 def cal_loss(model, images, labels):
+    
     with tf.GradientTape() as tape:
-        # 라벨 shape을 다시 맞추고 아래 코드들 다시 수정하자!!! 기억해!!
-        # 조금만 더 고치면 될 것 같다 (조금만더 힘내고 기억해!!!!!!!!!!!!!!!)
+
         logits = run_model(model, images, True)
         offsets = tf.cast(grid_offset(FLAGS.output_size, FLAGS.output_size), tf.float32)
         pred = tf.reshape(logits,
                           [FLAGS.batch_size, FLAGS.output_size, FLAGS.output_size, 5, 4+1+FLAGS.num_classes])
         I_obj = labels[:, :, :, :, 20]
         I_obj = tf.expand_dims(I_obj, -1)
-        nI_obj = tf.keras.backend.sum(tf.cast(I_obj > 0.0, tf.float32))
+        nI_obj = tf.reduce_sum(tf.cast(I_obj > 0.0, tf.float32))
         predict_xy = tf.nn.sigmoid(pred[:, :, :, :, 0:2])
         predict_xy = predict_xy + offsets
         predict_wh = tf.exp(pred[:, :, :, :, 2:4]) * ANCHORS
         predict_box = tf.concat([predict_xy, predict_wh], -1)
         
         object_conf = tf.nn.sigmoid(pred[:, :, :, :, 4:5])
+        # loss가 잘못된곳은 없는지 확인해봐야한다. 눈에띄게 감소하는 폭이 늘어나지 않았기 때문에
 
         ####################################################################################
         # 박스 좌표 loss
-        xy_loss = 1 * tf.reduce_sum(I_obj * tf.square(labels[:, :, :, :, 21:23] - predict_xy), [1,2,3,4]) / (nI_obj + 1e-6)
-        wh_loss = 1 * tf.reduce_sum(I_obj * tf.square(
-            tf.sqrt(labels[:, :, :, :, 23:25]) - tf.sqrt(predict_wh)), [1,2,3,4]) / (nI_obj + 1e-6)
+        xy_loss = tf.reduce_sum(1 * I_obj * tf.square(
+            labels[:, :, :, :, 21:23] - predict_xy)) / (nI_obj + 1e-6) / 2.
+        wh_loss = tf.reduce_sum(1 * I_obj * tf.square(
+            tf.sqrt(labels[:, :, :, :, 23:25]) - tf.sqrt(predict_wh))) / (nI_obj + 1e-6) / 2.
         coord_loss = xy_loss + wh_loss  # 논문의 첫 번째 수식
-        #print(coord_loss)
+        print(coord_loss)
         ####################################################################################
 
         ####################################################################################
-        # obect loss (오브젝트가 있을 때의 loss)
+        # obect loss (오브젝트가 있을 때와 없을때의 loss)
         iou = IOU(predict_box, labels[:, :, :, :, 21:25])
-        best_box = tf.keras.backend.max(iou, 4)
+        best_box = tf.reduce_max(iou, 4)
         best_box = tf.expand_dims(best_box, -1)
-        object_loss = 5 * tf.reduce_sum(I_obj * tf.square(iou-object_conf), [1,2,3,4]) / (nI_obj + 1e-6)
-        #print(object_loss)
-        ####################################################################################
 
-        ####################################################################################
-        # no object loss (오브젝트가 없을 때의 loss)
-        no_I_obj = tf.cast(best_box < 0.6, tf.keras.backend.dtype(best_box))
-        no_I_obj = no_I_obj * (1 - I_obj)
-        nb_no_I_obj = tf.keras.backend.sum(tf.cast(no_I_obj > 0.0, tf.float32))
-        no_object_loss = 1 * tf.reduce_sum(no_I_obj * tf.square(-object_conf), [1,2,3,4]) / (nb_no_I_obj + 1e-6)
-        #print(no_object_loss)   # 너무큰대!?!?!?
+        conf_mask = tf.cast(best_box < 0.6, tf.float32) * (1 - I_obj) * 1
+        conf_mask = conf_mask + I_obj * 5
+        nb_conf_mask = tf.reduce_sum(tf.cast(conf_mask > 0.0, tf.float32))
+        ob_loss = tf.reduce_sum(tf.square(I_obj - object_conf) * conf_mask) / (nb_conf_mask + 1e-6)
+        print(ob_loss)
         ####################################################################################
 
         ####################################################################################
         # class loss
         pred_class = pred[:, :, :, :, 5:]   # [B, 13, 13, 5, 20]
         true_class = labels[:, :, :, :, :20]   # [B, 13, 13, 5, 20]
-        class_loss = tf.keras.losses.categorical_crossentropy(true_class,
-                                                              pred_class,
-                                                              from_logits=True)
+        true_class = tf.argmax(true_class, -1)  
+        class_loss = tf.keras.losses.sparse_categorical_crossentropy(true_class,
+                                                                      pred_class,
+                                                                      from_logits=True)
         class_loss = tf.expand_dims(class_loss, -1) * I_obj
-        class_loss = 1 * tf.reduce_sum(class_loss, [1,2,3,4]) / (nI_obj + 1e-6)
+        class_loss = 1 * tf.reduce_sum(class_loss) / (nI_obj + 1e-6)
         #print(class_loss)
         ####################################################################################
 
-        total_loss = tf.reduce_mean(coord_loss + object_loss + no_object_loss + class_loss)
+        total_loss = (coord_loss + ob_losss + class_loss)
 
     grads = tape.gradient(total_loss, model.trainable_variables)
     optim.apply_gradients(zip(grads, model.trainable_variables))
     return total_loss
+
+def generate_images(model, images, SCORE_threhold, IOU_threshold):
+
+    logits = run_model(model, images, False)
+    logits = tf.reshape(logits,
+                        [FLAGS.batch_size,
+                         FLAGS.output_size,
+                         FLAGS.output_size,
+                         5,
+                         25])
+    offsets = tf.cast(grid_offset(FLAGS.output_size, FLAGS.output_size), tf.float32)
+    for batch in range(FLAGS.batch_size):
+        image = images[batch].numpy()
+        logits_ = tf.expand_dims(logits[batch], 0)  # [1, 13, 13, 5, 25]
+        re_scale = tf.keras.backend.cast_to_floatx(tf.keras.backend.int_shape(logits_)[1:3]) # [1,] --> {13., 13.}
+        re_scale = tf.reshape(re_scale, [1,1,1,1,2])    # rescale by 13
+
+        predict_xy = tf.nn.sigmoid(logits_[..., 0:2])
+        predict_xy = (predict_xy + offsets) / re_scale
+
+        predict_wh = (tf.exp(logits_[..., 2:4]) * ANCHORS) / re_scale
+
+        confidence_score = tf.nn.sigmoid(logits_[..., 4:5])
+        predict_class = tf.nn.softmax(logits_[..., 5:], 4)
+
+        predict_xy = predict_xy[0, ...] # squezze batch index
+        predict_wh = predict_wh[0, ...] # squezze batch index
+        confidence_score = confidence_score[0, ...] # squezze batch index
+        predict_class = predict_class[0, ...] # squezze batch index
+
+        box_xy1 = predict_xy - 0.5 * predict_wh # xmin, ymin [13, 13, 5, 2]
+        box_xy2 = predict_xy + 0.5 * predict_wh # xmax, ymax [13, 13, 5, 2]
+        box = tf.concat([box_xy1, box_xy2], -1) # [13, 13, 5, 4]
+        
+        box_score = confidence_score * predict_class    # [13, 13, 5, 20]
+        box_class_index = tf.argmax(box_score, -1)  # [13, 13, 5]
+        box_class_score = tf.keras.backend.max(box_score, -1)   # [13, 13, 5]
+        prediction_mask = box_class_score >= SCORE_threhold # [13, 13, 5]
+
+        boxes = tf.boolean_mask(box, prediction_mask) # box_class_score >= SCORE_threhold 인 성분만 가지고옴
+        scores = tf.boolean_mask(box_class_score, prediction_mask)
+        classes = tf.boolean_mask(box_class_index, prediction_mask)
+
+        # NMS
+        selected_indices = tf.image.non_max_suppression(boxes, scores, 50, IOU_threshold)
+        boxes = tf.gather(boxes, selected_indices)
+        scores = tf.gather(scores, selected_indices)
+        classes = tf.gather(classes, selected_indices)
+
+        im = np.array(image)
+        height, width, _ = im.shape
+
+        # Create figure and axes
+        fig, ax = plt.subplots(1)
+        # Display the image
+        ax.imshow(im)
+
+        # Create a Rectangle potch
+        count_detected = boxes.shape[0]
+        for j in range(count_detected):
+            box = boxes[j]
+            assert len(box) == 4, "Got more values than in x, y, w, h, in a box!"
+            x = box[0] * width
+            y = box[1] * height
+            w = (box[2] - box[0]) * width
+            h = (box[3] - box[1]) * height
+            class_ = classes[j].numpy()
+
+            rect = patches.Rectangle(
+                (x.numpy(), y.numpy()),
+                w.numpy(),
+                h.numpy(),
+                linewidth=1,
+                edgecolor="r",
+                facecolor="none",
+            )
+            # Add the patch to the Axes
+            ax.add_patch(rect)
+
+        plt.show()
+
+    # dim??!?!? 필요한가?
+
+    #return img
 
 def main():
     model = Yolo_V2()
@@ -275,13 +361,14 @@ def main():
                 tr_label = tf.convert_to_tensor(tr_label)
 
                 loss = cal_loss(model, image, tr_label)
-                
-                #a = cal_mAP(predict_boxes, target_label)    # Not implement
 
                 if count % 10 == 0:
                     print("Epoch: {} [{}/{}] loss = {}".format(epoch, step + 1, batch_idx, loss))
-                # 내잃은 여기 그림그리는곳부터!!!
+                
                 count += 1
+
+            if epoch % 20 == 0:
+                generate_images(model, image, 0.01, 0.01)
 
 if __name__ == "__main__":
     main()
