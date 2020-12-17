@@ -9,9 +9,9 @@ import matplotlib.patches as patches
 import os
 import sys
 
-flags.DEFINE_string("tr_txt_path", "D:/[1]DB/[3]detection_DB/PascalVoc2012/pascal_voc_2012/VOC2012/test", "Training text path")
+flags.DEFINE_string("tr_txt_path", "D:/[1]DB/[3]detection_DB/archive/100example_txt", "Training text path")
 
-flags.DEFINE_string("tr_img_path", "D:/[1]DB/[3]detection_DB/PascalVoc2012/pascal_voc_2012/VOC2012/JPEGImages", "Training image path")
+flags.DEFINE_string("tr_img_path", "D:/[1]DB/[3]detection_DB/archive/images", "Training image path")
 
 flags.DEFINE_integer("img_size", 416, "Image size (Original is 416, but to use pre-trained)")
 
@@ -38,7 +38,7 @@ ANCHORS = np.array(ANCHORS)
 ANCHORS_box = ANCHORS.reshape(len(ANCHORS) // 2, 2)
 ANCHORS = np.reshape(ANCHORS, [1,1,1,5,2])
 
-optim = RAdamOptimizer(1e-5)
+optim = tf.keras.optimizers.Adam(0.5e-4)
 
 def func_(image, label):
 
@@ -71,55 +71,52 @@ def read_label(file, batch_size):
             line = f.readline()
             if not line: break
             line = line.split('\n')[0]
-            # 이 부분을 고쳐야 하나?
-            xmin = int(int(line.split(',')[0]))
-            xmax = int(int(line.split(',')[2]))
-            ymin = int(int(line.split(',')[1]))
-            ymax = int(int(line.split(',')[3]))
-            height = int(line.split(',')[4])
-            width = int(line.split(',')[5])
-            classes = int(line.split(',')[6])
 
-            x = (xmin + xmax) // 2
-            y = (ymin + ymax) // 2
-            w = xmax - xmin
-            h = ymax - ymin
+            xmin = (float(line.split(' ')[1]))
+            xmax = (float(line.split(' ')[2]))
+            ymin = (float(line.split(' ')[3]))
+            ymax = (float(line.split(' ')[4]))
+            #height = int(line.split(' ')[4])
+            #width = int(line.split(' ')[5])
+            classes = int(line.split(' ')[0])
 
-            x = x * (1/width)
-            w = w * (1/width)
-            y = y * (1/height)
-            h = h * (1/height)
+            xmin = xmin * FLAGS.img_size
+            xmin = max(min(xmin, FLAGS.img_size), 0)
+            xmax = xmax * FLAGS.img_size
+            xmax = max(min(xmax, FLAGS.img_size), 0)
 
-            i, j = int(FLAGS.output_size * x), int(FLAGS.output_size * y)
-            x_cell, y_cell = FLAGS.output_size * x - i, FLAGS.output_size * y - j
-            width_cell = w * FLAGS.output_size
-            height_cell = h * FLAGS.output_size
+            ymin = ymin * FLAGS.img_size
+            ymin = max(min(ymin, FLAGS.img_size), 0)
+            ymax = ymax * FLAGS.img_size
+            ymax = max(min(ymax, FLAGS.img_size), 0)
 
-            boxData = [x_cell, y_cell, width_cell, height_cell]
+            if xmax > xmin and ymax > ymin:
+                x = (xmin + xmax) * 0.5
+                x = x / FLAGS.img_size / FLAGS.output_size
+                y = (ymin + ymax) * 0.5
+                y = y / FLAGS.img_size / FLAGS.output_size
+                grid_x = int(np.floor(x))
+                grid_y = int(np.floor(y))
+                if grid_x < FLAGS.output_size and grid_y < FLAGS.output_size:
+                    w = (xmax - xmin) / FLAGS.img_size / FLAGS.output_size
+                    h = (ymax - ymin) / FLAGS.img_size / FLAGS.output_size
 
-            responsibleGridX = i
-            responsibleGridY = j
+                    boxData = [x, y, w, h]
+                    best_box = 0
+                    best_anchor = 0
+                    for i in range(anchor_count):
+                        intersect = np.minimum(w, ANCHORS_box[i, 0]) * np.minimum(h, ANCHORS_box[i, 1])
+                        union = ANCHORS_box[i, 0] * ANCHORS_box[i, 1] + (w * h) - intersect
+                        iou = intersect / union
+                        if iou > best_box:
+                            best_box = iou
+                            best_anchor = i
 
-            if width_cell * height_cell > 0:
-                best_box = 0
-                best_anchor = 0
-                for i in range(anchor_count):
-                    intersect = np.minimum(width_cell, ANCHORS_box[i, 0]) * np.minimum(height_cell, ANCHORS_box[i, 1])
-                    union = ANCHORS_box[i, 0] * ANCHORS_box[i, 1] + (width_cell * height_cell) - intersect
-                    iou = intersect / union
-                    if iou > best_box:
-                        best_box = iou
-                        best_anchor = i
-                if best_box > 0:
-                    #detector_mask[b, responsibleGridX, responsibleGridY, best_anchor] = 1
-                    #yolo_box = np.array([x_cell, y_cell, width_cell, height_cell, ])
-                    # 이 부분 고쳐야한다.
+                    responsibleGrid[b][grid_x][grid_y][best_anchor][classes] = 1.    # class
+                    responsibleGrid[b][grid_x][grid_y][best_anchor][21:25] = boxData    # box
+                    responsibleGrid[b][grid_x][grid_y][best_anchor][FLAGS.num_classes] = 1. # confidence
 
-                    responsibleGrid[b][responsibleGridX][responsibleGridY][best_anchor][classes] = 1.    # class
-                    responsibleGrid[b][responsibleGridX][responsibleGridY][best_anchor][21:25] = boxData    # box
-                    responsibleGrid[b][responsibleGridX][responsibleGridY][best_anchor][FLAGS.num_classes] = 1. # confidence
-
-                traget_grid.append([classes, 1, x, y, w, h])
+                    traget_grid.append([classes, 1, x, y, w, h])
 
         full_target_grid.append(traget_grid)
 
@@ -159,7 +156,7 @@ def IOU(predict_box, label_box):
     intersect_y1 = intersect_y1.numpy()
     intersect_x2 = intersect_x2.numpy()
     intersect_y2 = intersect_y2.numpy()
-
+    
     intersect = (intersect_x2 - intersect_x1).clip(0) * (intersect_y2 - intersect_y1).clip(0)
 
     box1_area = tf.abs((box1_x2 - box1_x1) * (box1_y2 - box1_y1))
@@ -195,11 +192,12 @@ def cal_loss(model, images, labels):
         ####################################################################################
         # 박스 좌표 loss
         xy_loss = tf.reduce_sum(1 * I_obj * tf.square(
-            labels[:, :, :, :, 21:23] - predict_xy)) / (nI_obj + 1e-6) / 2.
+            labels[:, :, :, :, 21:23] - predict_xy)) / (nI_obj + 1e-6)
         wh_loss = tf.reduce_sum(1 * I_obj * tf.square(
-            tf.sqrt(labels[:, :, :, :, 23:25]) - tf.sqrt(predict_wh))) / (nI_obj + 1e-6) / 2.
+            tf.sqrt(labels[:, :, :, :, 23:25]) - tf.sqrt(predict_wh))) / (nI_obj + 1e-6)
         coord_loss = xy_loss + wh_loss  # 논문의 첫 번째 수식
-        print(coord_loss)
+        #print(coord_loss)
+        #print("loss_xywh = {:4.3f}".format(coord_loss))
         ####################################################################################
 
         ####################################################################################
@@ -212,7 +210,7 @@ def cal_loss(model, images, labels):
         conf_mask = conf_mask + I_obj * 5
         nb_conf_mask = tf.reduce_sum(tf.cast(conf_mask > 0.0, tf.float32))
         ob_loss = tf.reduce_sum(tf.square(I_obj - object_conf) * conf_mask) / (nb_conf_mask + 1e-6)
-        print(ob_loss)
+        #print(ob_loss)
         ####################################################################################
 
         ####################################################################################
@@ -228,14 +226,42 @@ def cal_loss(model, images, labels):
         #print(class_loss)
         ####################################################################################
 
-        total_loss = (coord_loss + ob_losss + class_loss)
+        total_loss = (coord_loss + ob_loss + class_loss)
 
     grads = tape.gradient(total_loss, model.trainable_variables)
     optim.apply_gradients(zip(grads, model.trainable_variables))
     return total_loss
 
-def generate_images(model, images, SCORE_threhold, IOU_threshold):
+class BoundBox:
+    def __init__(self, xmin, ymin, xmax, ymax, confidence=None,classes=None):
+        self.xmin, self.ymin = xmin, ymin
+        self.xmax, self.ymax = xmax, ymax
+        ## the code below are used during inference
+        # probability
+        self.confidence      = confidence
+        # class probaiblities [c1, c2, .. cNclass]
+        self.set_class(classes)
+        
+    def set_class(self,classes):
+        self.classes = classes
+        self.label   = np.argmax(self.classes) 
+        
+    def get_label(self):  
+        return(self.label)
+    
+    def get_score(self):
+        return(self.classes[self.label])
 
+def generate_images(model, images, obj_threhold, iou_threshold):
+
+    def adjust_minmax(c,_max):
+        if c < 0:
+            c = 0   
+        if c > _max:
+            c = _max
+        return c
+
+    # https://www.maskaravivek.com/post/yolov2/
     logits = run_model(model, images, False)
     logits = tf.reshape(logits,
                         [FLAGS.batch_size,
@@ -246,41 +272,50 @@ def generate_images(model, images, SCORE_threhold, IOU_threshold):
     offsets = tf.cast(grid_offset(FLAGS.output_size, FLAGS.output_size), tf.float32)
     for batch in range(FLAGS.batch_size):
         image = images[batch].numpy()
-        logits_ = tf.expand_dims(logits[batch], 0)  # [1, 13, 13, 5, 25]
+        logits_ = logits[batch].numpy()   # [13, 13, 5, 25]
         re_scale = tf.keras.backend.cast_to_floatx(tf.keras.backend.int_shape(logits_)[1:3]) # [1,] --> {13., 13.}
-        re_scale = tf.reshape(re_scale, [1,1,1,1,2])    # rescale by 13
+        re_scale = tf.reshape(re_scale, [1,1,1,2])    # rescale by 13
 
-        predict_xy = tf.nn.sigmoid(logits_[..., 0:2])
-        predict_xy = (predict_xy + offsets) / re_scale
+        logits_[..., 0:2] = (tf.nn.sigmoid(logits_[..., 0:2]) + offsets[batch]) / re_scale # x,y
+        logits_[..., 2:4] = (tf.exp(logits_[..., 2:4]) * ANCHORS) / re_scale    # w,h
+        logits_[..., 0:2] = logits_[..., 0:2] - logits_[..., 2:4] * 0.5 # xmin, ymin
+        logits_[..., 2:4] = logits_[..., 0:2] + logits_[..., 2:4] * 0.5 # xmax, ymax
 
-        predict_wh = (tf.exp(logits_[..., 2:4]) * ANCHORS) / re_scale
-
-        confidence_score = tf.nn.sigmoid(logits_[..., 4:5])
-        predict_class = tf.nn.softmax(logits_[..., 5:], 4)
-
-        predict_xy = predict_xy[0, ...] # squezze batch index
-        predict_wh = predict_wh[0, ...] # squezze batch index
-        confidence_score = confidence_score[0, ...] # squezze batch index
-        predict_class = predict_class[0, ...] # squezze batch index
-
-        box_xy1 = predict_xy - 0.5 * predict_wh # xmin, ymin [13, 13, 5, 2]
-        box_xy2 = predict_xy + 0.5 * predict_wh # xmax, ymax [13, 13, 5, 2]
-        box = tf.concat([box_xy1, box_xy2], -1) # [13, 13, 5, 4]
+        logits_[..., 4:5] = tf.nn.sigmoid(logits_[..., 4:5])    # confidence
+        logits_[..., 5:] = tf.nn.softmax(logits_[..., 5:], 3)   # class
         
-        box_score = confidence_score * predict_class    # [13, 13, 5, 20]
-        box_class_index = tf.argmax(box_score, -1)  # [13, 13, 5]
-        box_class_score = tf.keras.backend.max(box_score, -1)   # [13, 13, 5]
-        prediction_mask = box_class_score >= SCORE_threhold # [13, 13, 5]
+        logits_[..., 5:] = logits_[..., 4:5] * logits_[..., 5:]    # [13, 13, 5, 25]   # box_scores
+        box_classes = tf.argmax(logits_[..., 5:], 3)
+        box_classes_scores = tf.keras.backend.max(logits_[..., 5:], axis=-1)
 
-        boxes = tf.boolean_mask(box, prediction_mask) # box_class_score >= SCORE_threhold 인 성분만 가지고옴
-        scores = tf.boolean_mask(box_class_score, prediction_mask)
-        classes = tf.boolean_mask(box_class_index, prediction_mask)
+        prediction_mask = box_classes_scores >= obj_threhold
+        boxes = tf.boolean_mask(logits_[..., 0:4], prediction_mask)
+        scores = tf.boolean_mask(box_classes_scores, prediction_mask)
+        classes = tf.boolean_mask(box_classes, prediction_mask)
 
-        # NMS
-        selected_indices = tf.image.non_max_suppression(boxes, scores, 50, IOU_threshold)
-        boxes = tf.gather(boxes, selected_indices)
-        scores = tf.gather(scores, selected_indices)
-        classes = tf.gather(classes, selected_indices)
+        #nms
+        selected_idx = tf.image.non_max_suppression(boxes, 
+                                                    scores, 
+                                                    1, 
+                                                    iou_threshold=iou_threshold)
+        boxes = tf.keras.backend.gather(boxes, selected_idx)
+        scores = tf.keras.backend.gather(scores, selected_idx)
+        classes = tf.keras.backend.gather(classes, selected_idx)
+
+        #boxes_ = []
+        #for row in range(FLAGS.output_size):
+        #    for col in range(FLAGS.output_size):
+        #        for b in range(5):
+        #            classes = logits_[row, col, b, 5:]
+
+        #            if np.sum(classes) > 0:
+        #                x, y, w, h = logits_[row, col, b, :4]
+        #                confid = logits_[row, col, b, 4]
+        #                box = BoundBox(x-w/2, y-h/2, x+w/2, y+h/2, confid, classes)
+        #                if box.get_score() > obj_threhold:
+        #                    boxes_.append(box) # 적당한 값을 저장을 해놔야 하는데...
+
+        #final_boxes = nms_process(boxes_, iou_threshold, iou_threshold)
 
         im = np.array(image)
         height, width, _ = im.shape
@@ -291,20 +326,14 @@ def generate_images(model, images, SCORE_threhold, IOU_threshold):
         ax.imshow(im)
 
         # Create a Rectangle potch
-        count_detected = boxes.shape[0]
-        for j in range(count_detected):
-            box = boxes[j]
-            assert len(box) == 4, "Got more values than in x, y, w, h, in a box!"
-            x = box[0] * width
-            y = box[1] * height
-            w = (box[2] - box[0]) * width
-            h = (box[3] - box[1]) * height
-            class_ = classes[j].numpy()
-
+        for box in boxes:
+            assert len(box) == 4, "Got more values than in x1, y1, x2, y2, in a box!"
+            
+            # 여기가 뭔가 이상하다... 학습은 되는데... 박스가 이상하게 생긴다..
             rect = patches.Rectangle(
-                (x.numpy(), y.numpy()),
-                w.numpy(),
-                h.numpy(),
+                (box[1] * height, box[0] * width),
+                (box[3] - box[1]) * width,
+                (box[2] - box[0]) * height,
                 linewidth=1,
                 edgecolor="r",
                 facecolor="none",
@@ -312,11 +341,66 @@ def generate_images(model, images, SCORE_threhold, IOU_threshold):
             # Add the patch to the Axes
             ax.add_patch(rect)
 
+
         plt.show()
 
-    # dim??!?!? 필요한가?
+def nms_process(boxes, iou_threshold, obj_threshold):
 
-    #return img
+    CLASS = len(boxes[0].classes)
+    index_box = []
+    # NMS
+    for c in range(CLASS):
+        class_probability_from_bbx = [box.classes[c] for box in boxes]
+
+        sorted_indices = list(reversed(np.argsort(class_probability_from_bbx)))
+        for i in range(len(sorted_indices)):
+            index = sorted_indices[i]
+
+            if boxes[index].classes[c] == 0:
+                continue # ignore the zero probability
+            else:
+                index_box.append(index)
+                for j in range(i + 1, len(sorted_indices)):
+                    index_j = sorted_indices[j]
+                    box_iou = test_IOU(boxes[index], boxes[index_j])
+                    if box_iou >= iou_threshold:
+                        classes = boxes[index_j].classes
+                        classes[c] = 0  # set prob 0
+                        boxes[index_j].set_class(classes)
+
+    newbox = [boxes[i] for i in index_box if boxes[i].get_score() > obj_threshold]
+
+    return newbox
+
+def test_IOU(box1, box2):
+
+    box1_x1 = box1.xmin # xmin1
+    box1_y1 = box1.ymin # ymin1
+    box1_x2 = box1.xmax # xmax1
+    box1_y2 = box1.ymax # ymax1
+
+    box2_x1 = box2.xmin # xmin2
+    box2_y1 = box2.ymin # ymin2
+    box2_x2 = box2.xmax # xmax2
+    box2_y2 = box2.ymax # ymax2
+
+    intersect_x1 = tf.maximum(box1_x1, box2_x1)
+    intersect_y1 = tf.maximum(box1_y1, box2_y1)
+    intersect_x2 = tf.minimum(box1_x2, box2_x2)
+    intersect_y2 = tf.minimum(box1_y2, box2_y2)
+    intersect_x1 = intersect_x1.numpy()
+    intersect_y1 = intersect_y1.numpy()
+    intersect_x2 = intersect_x2.numpy()
+    intersect_y2 = intersect_y2.numpy()
+
+    intersect = (intersect_x2 - intersect_x1).clip(0) * (intersect_y2 - intersect_y1).clip(0)
+
+    box1_area = tf.abs((box1_x2 - box1_x1) * (box1_y2 - box1_y1))
+    box2_area = tf.abs((box2_x2 - box2_x1) * (box2_y2 - box2_y1))
+
+    iou = intersect / (box1_area + box2_area - intersect + 1e-6)
+
+    return iou
 
 def main():
     model = Yolo_V2()
@@ -367,8 +451,8 @@ def main():
                 
                 count += 1
 
-            if epoch % 20 == 0:
-                generate_images(model, image, 0.01, 0.01)
+            if epoch % 100 == 0 and epoch != 0:
+                generate_images(model, image, 0.015, 0.01)
 
 if __name__ == "__main__":
     main()
