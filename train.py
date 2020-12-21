@@ -174,10 +174,9 @@ def cal_loss(model, images, labels):
     
     with tf.GradientTape() as tape:
 
-        logits = run_model(model, images, True)
+        pred = run_model(model, images, True)   # 입력이 두개어야 한다.
         offsets = tf.cast(grid_offset(FLAGS.output_size, FLAGS.output_size), tf.float32)
-        pred = tf.reshape(logits,
-                          [FLAGS.batch_size, FLAGS.output_size, FLAGS.output_size, 5, 4+1+FLAGS.num_classes])
+
         I_obj = labels[:, :, :, :, 20]
         I_obj = tf.expand_dims(I_obj, -1)
         nI_obj = tf.reduce_sum(tf.cast(I_obj > 0.0, tf.float32))
@@ -254,6 +253,17 @@ class BoundBox:
 
 def generate_images(model, images, obj_threhold, iou_threshold):
 
+    def _sigmoid(x):
+        return 1. / (1. + np.exp(-x))
+    def _softmax(x, axis=-1, t=-100.):
+        x = x - np.max(x)
+
+        if np.min(x) < t:
+            x = x/np.min(x)*t
+
+        e_x = np.exp(x)
+        return e_x / e_x.sum(axis, keepdims=True)
+
     def adjust_minmax(c,_max):
         if c < 0:
             c = 0   
@@ -263,59 +273,40 @@ def generate_images(model, images, obj_threhold, iou_threshold):
 
     # https://www.maskaravivek.com/post/yolov2/
     logits = run_model(model, images, False)
-    logits = tf.reshape(logits,
-                        [FLAGS.batch_size,
-                         FLAGS.output_size,
-                         FLAGS.output_size,
-                         5,
-                         25])
+
     offsets = tf.cast(grid_offset(FLAGS.output_size, FLAGS.output_size), tf.float32)
+    # offset은 그대로 잘 되고 있음 --> offset 문제는 아니다
     for batch in range(FLAGS.batch_size):
         image = images[batch].numpy()
         logits_ = logits[batch].numpy()   # [13, 13, 5, 25]
         re_scale = tf.keras.backend.cast_to_floatx(tf.keras.backend.int_shape(logits_)[1:3]) # [1,] --> {13., 13.}
         re_scale = tf.reshape(re_scale, [1,1,1,2])    # rescale by 13
 
-        logits_[..., 0:2] = (tf.nn.sigmoid(logits_[..., 0:2]) + offsets[batch]) / re_scale # x,y
-        logits_[..., 2:4] = (tf.exp(logits_[..., 2:4]) * ANCHORS) / re_scale    # w,h
-        logits_[..., 0:2] = logits_[..., 0:2] - logits_[..., 2:4] * 0.5 # xmin, ymin
-        logits_[..., 2:4] = logits_[..., 0:2] + logits_[..., 2:4] * 0.5 # xmax, ymax
+        (mat_GRID_W,
+         mat_GRID_H,
+         mat_ANCHOR_W,
+         mat_ANCHOR_H) = get_shifting_matrix(logits_)
 
-        logits_[..., 4:5] = tf.nn.sigmoid(logits_[..., 4:5])    # confidence
-        logits_[..., 5:] = tf.nn.softmax(logits_[..., 5:], 3)   # class
+        logits_[..., 0] = (_sigmoid(logits_[..., 0]) + mat_GRID_W) / FLAGS.output_size
+        logits_[..., 1] = (_sigmoid(logits_[..., 1]) + mat_GRID_H) / FLAGS.output_size
+        logits_[..., 2] = (np.exp(logits_[..., 2]) + mat_ANCHOR_W) / FLAGS.output_size
+        logits_[..., 3] = (np.exp(logits_[..., 3]) + mat_ANCHOR_H) / FLAGS.output_size
+
+        logits_[..., 0] = logits_[..., 0] - 0.5 * logits_[..., 2]
+        logits_[..., 1] = logits_[..., 1] - 0.5 * logits_[..., 3]
+        logits_[..., 2] = logits_[..., 0] + 0.5 * logits_[..., 2]
+        logits_[..., 3] = logits_[..., 1] + 0.5 * logits_[..., 3]
+
+        logits_[..., 4:5] = _sigmoid(logits_[..., 4:5])    # confidence
+        logits_[..., 5:] = _softmax(logits_[..., 5:], -1)   # class
         
         logits_[..., 5:] = logits_[..., 4:5] * logits_[..., 5:]    # [13, 13, 5, 25]   # box_scores
-        box_classes = tf.argmax(logits_[..., 5:], 3)
-        box_classes_scores = tf.keras.backend.max(logits_[..., 5:], axis=-1)
 
-        prediction_mask = box_classes_scores >= obj_threhold
-        boxes = tf.boolean_mask(logits_[..., 0:4], prediction_mask)
-        scores = tf.boolean_mask(box_classes_scores, prediction_mask)
-        classes = tf.boolean_mask(box_classes, prediction_mask)
+        # 이 부분에다가 추가
 
         #nms
-        selected_idx = tf.image.non_max_suppression(boxes, 
-                                                    scores, 
-                                                    1, 
-                                                    iou_threshold=iou_threshold)
-        boxes = tf.keras.backend.gather(boxes, selected_idx)
-        scores = tf.keras.backend.gather(scores, selected_idx)
-        classes = tf.keras.backend.gather(classes, selected_idx)
-
-        #boxes_ = []
-        #for row in range(FLAGS.output_size):
-        #    for col in range(FLAGS.output_size):
-        #        for b in range(5):
-        #            classes = logits_[row, col, b, 5:]
-
-        #            if np.sum(classes) > 0:
-        #                x, y, w, h = logits_[row, col, b, :4]
-        #                confid = logits_[row, col, b, 4]
-        #                box = BoundBox(x-w/2, y-h/2, x+w/2, y+h/2, confid, classes)
-        #                if box.get_score() > obj_threhold:
-        #                    boxes_.append(box) # 적당한 값을 저장을 해놔야 하는데...
-
-        #final_boxes = nms_process(boxes_, iou_threshold, iou_threshold)
+        boxes = find_high_class_prob_bbox(logits_, obj_threhold)
+        boxes_ = nms_process(boxes, iou_threshold)
 
         im = np.array(image)
         height, width, _ = im.shape
@@ -326,14 +317,18 @@ def generate_images(model, images, obj_threhold, iou_threshold):
         ax.imshow(im)
 
         # Create a Rectangle potch
-        for box in boxes:
+        for box in boxes_:
             assert len(box) == 4, "Got more values than in x1, y1, x2, y2, in a box!"
-            
+            xmin = adjust_minmax(int(box[1] * FLAGS.img_size), FLAGS.img_size)
+            ymin = adjust_minmax(int(box[0] * FLAGS.img_size), FLAGS.img_size)
+            xmax = adjust_minmax(int(box[3] * FLAGS.img_size), FLAGS.img_size)
+            ymax = adjust_minmax(int(box[2] * FLAGS.img_size), FLAGS.img_size)
+
             # 여기가 뭔가 이상하다... 학습은 되는데... 박스가 이상하게 생긴다..
             rect = patches.Rectangle(
-                (box[1] * height, box[0] * width),
-                (box[3] - box[1]) * width,
-                (box[2] - box[0]) * height,
+                (xmin, ymin),
+                (xmax - xmin),
+                (ymax - ymin),
                 linewidth=1,
                 edgecolor="r",
                 facecolor="none",
@@ -344,66 +339,96 @@ def generate_images(model, images, obj_threhold, iou_threshold):
 
         plt.show()
 
-def nms_process(boxes, iou_threshold, obj_threshold):
+#def nms_process(boxes, iou_threshold):      # 이 부분 고쳐야한다.
 
-    CLASS = len(boxes[0].classes)
-    index_box = []
-    # NMS
-    for c in range(CLASS):
-        class_probability_from_bbx = [box.classes[c] for box in boxes]
+#   '''
+#    boxes : list containing "good" BoundBox of a frame
+#            [BoundBox(),BoundBox(),...]
+#    '''
+#    bestAnchorBoxFinder = BestAnchorBoxFinder([])
+    
+#    CLASS    = len(boxes[0].classes)
+#    index_boxes = []   
+#    # suppress non-maximal boxes
+#    for c in range(CLASS):
+#        # extract class probabilities of the c^th class from multiple bbox
+#        class_probability_from_bbxs = [box.classes[c] for box in boxes]
 
-        sorted_indices = list(reversed(np.argsort(class_probability_from_bbx)))
-        for i in range(len(sorted_indices)):
-            index = sorted_indices[i]
+#        #sorted_indices[i] contains the i^th largest class probabilities
+#        sorted_indices = list(reversed(np.argsort( class_probability_from_bbxs)))
 
-            if boxes[index].classes[c] == 0:
-                continue # ignore the zero probability
-            else:
-                index_box.append(index)
-                for j in range(i + 1, len(sorted_indices)):
-                    index_j = sorted_indices[j]
-                    box_iou = test_IOU(boxes[index], boxes[index_j])
-                    if box_iou >= iou_threshold:
-                        classes = boxes[index_j].classes
-                        classes[c] = 0  # set prob 0
-                        boxes[index_j].set_class(classes)
+#        for i in range(len(sorted_indices)):
+#            index_i = sorted_indices[i]
+            
+#            # if class probability is zero then ignore
+#            if boxes[index_i].classes[c] == 0:  
+#                continue
+#            else:
+#                index_boxes.append(index_i)
+#                for j in range(i+1, len(sorted_indices)):
+#                    index_j = sorted_indices[j]
+                    
+#                    # check if the selected i^th bounding box has high IOU with any of the remaining bbox
+#                    # if so, the remaining bbox' class probabilities are set to 0.
+#                    bbox_iou = bestAnchorBoxFinder.bbox_iou(boxes[index_i], boxes[index_j])
+#                    if bbox_iou >= iou_threshold:
+#                        classes = boxes[index_j].classes
+#                        classes[c] = 0
+#                        boxes[index_j].set_class(classes)
+                        
+#    newboxes = [ boxes[i] for i in index_boxes if boxes[i].get_score() > obj_threshold ]                
+    
+#    return newboxes
 
-    newbox = [boxes[i] for i in index_box if boxes[i].get_score() > obj_threshold]
+def get_shifting_matrix(netout):
 
-    return newbox
+    Anchors = [0.57273, 0.677385, 1.87446, 2.06253, 3.33843, 5.47434, 7.88282, 3.52778, 9.77052, 9.16828]
+    Anchors = np.array(Anchors)
 
-def test_IOU(box1, box2):
+    GRID_H, GRID_W, BOX = netout.shape[:3]
+    no = netout[...,0]
+        
+    ANCHORSw = Anchors[::2]
+    ANCHORSh = Anchors[1::2]
+       
+    mat_GRID_W = np.zeros_like(no)
+    for igrid_w in range(GRID_W):
+        mat_GRID_W[:,igrid_w,:] = igrid_w
 
-    box1_x1 = box1.xmin # xmin1
-    box1_y1 = box1.ymin # ymin1
-    box1_x2 = box1.xmax # xmax1
-    box1_y2 = box1.ymax # ymax1
+    mat_GRID_H = np.zeros_like(no)
+    for igrid_h in range(GRID_H):
+        mat_GRID_H[igrid_h,:,:] = igrid_h
 
-    box2_x1 = box2.xmin # xmin2
-    box2_y1 = box2.ymin # ymin2
-    box2_x2 = box2.xmax # xmax2
-    box2_y2 = box2.ymax # ymax2
+    mat_ANCHOR_W = np.zeros_like(no)
+    for ianchor in range(BOX):    
+        mat_ANCHOR_W[:,:,ianchor] = ANCHORSw[ianchor]
 
-    intersect_x1 = tf.maximum(box1_x1, box2_x1)
-    intersect_y1 = tf.maximum(box1_y1, box2_y1)
-    intersect_x2 = tf.minimum(box1_x2, box2_x2)
-    intersect_y2 = tf.minimum(box1_y2, box2_y2)
-    intersect_x1 = intersect_x1.numpy()
-    intersect_y1 = intersect_y1.numpy()
-    intersect_x2 = intersect_x2.numpy()
-    intersect_y2 = intersect_y2.numpy()
+    mat_ANCHOR_H = np.zeros_like(no) 
+    for ianchor in range(BOX):    
+        mat_ANCHOR_H[:,:,ianchor] = ANCHORSh[ianchor]
 
-    intersect = (intersect_x2 - intersect_x1).clip(0) * (intersect_y2 - intersect_y1).clip(0)
+    return(mat_GRID_W,mat_GRID_H,mat_ANCHOR_W,mat_ANCHOR_H)
 
-    box1_area = tf.abs((box1_x2 - box1_x1) * (box1_y2 - box1_y1))
-    box2_area = tf.abs((box2_x2 - box2_x1) * (box2_y2 - box2_y1))
+def find_high_class_prob_bbox(output, obj_threshold):
 
-    iou = intersect / (box1_area + box2_area - intersect + 1e-6)
+    GRID_H, GRID_W, BOX = output.shape[:3]
+    boxes = []
+    for row in range(GRID_H):
+        for col in range(GRID_W):
+            for b in range(BOX):
+                classes = output[row, col, b, 5:]
 
-    return iou
+                if np.sum(classes) > 0:
+                    x, y, w, h = output[row, col, b, :4]
+                    confidence = output[row, col, b, 4]
+                    box = BoundBox(x-w/2, y-h/2, x+w/2, y+h/2, confidence, classes)
+                    if box.get_score() > obj_threshold:
+                        boxes.append(box)
+
+    return(boxes)
 
 def main():
-    model = Yolo_V2()
+    model = Other_model()
     model.summary()
 
     if FLAGS.pre_checkpoint:
@@ -451,7 +476,7 @@ def main():
                 
                 count += 1
 
-            if epoch % 100 == 0 and epoch != 0:
+            if epoch % 10 == 0 and epoch != 0:
                 generate_images(model, image, 0.015, 0.01)
 
 if __name__ == "__main__":
