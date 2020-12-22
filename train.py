@@ -306,7 +306,7 @@ def generate_images(model, images, obj_threhold, iou_threshold):
 
         #nms
         boxes = find_high_class_prob_bbox(logits_, obj_threhold)
-        boxes_ = nms_process(boxes, iou_threshold)
+        boxes_ = nms_process(boxes, obj_threhold, iou_threshold)
 
         im = np.array(image)
         height, width, _ = im.shape
@@ -318,11 +318,11 @@ def generate_images(model, images, obj_threhold, iou_threshold):
 
         # Create a Rectangle potch
         for box in boxes_:
-            assert len(box) == 4, "Got more values than in x1, y1, x2, y2, in a box!"
-            xmin = adjust_minmax(int(box[1] * FLAGS.img_size), FLAGS.img_size)
-            ymin = adjust_minmax(int(box[0] * FLAGS.img_size), FLAGS.img_size)
-            xmax = adjust_minmax(int(box[3] * FLAGS.img_size), FLAGS.img_size)
-            ymax = adjust_minmax(int(box[2] * FLAGS.img_size), FLAGS.img_size)
+            #assert len(box) == 4, "Got more values than in x1, y1, x2, y2, in a box!"
+            xmin = adjust_minmax(int(box.xmin * FLAGS.img_size), FLAGS.img_size)
+            ymin = adjust_minmax(int(box.ymin * FLAGS.img_size), FLAGS.img_size)
+            xmax = adjust_minmax(int(box.xmax * FLAGS.img_size), FLAGS.img_size)
+            ymax = adjust_minmax(int(box.ymax * FLAGS.img_size), FLAGS.img_size)
 
             # 여기가 뭔가 이상하다... 학습은 되는데... 박스가 이상하게 생긴다..
             rect = patches.Rectangle(
@@ -339,46 +339,46 @@ def generate_images(model, images, obj_threhold, iou_threshold):
 
         plt.show()
 
-#def nms_process(boxes, iou_threshold):      # 이 부분 고쳐야한다.
+def nms_process(boxes, obj_threshold, iou_threshold):      # 이 부분 고쳐야한다.
 
-#   '''
-#    boxes : list containing "good" BoundBox of a frame
-#            [BoundBox(),BoundBox(),...]
-#    '''
-#    bestAnchorBoxFinder = BestAnchorBoxFinder([])
+    '''
+    boxes : list containing "good" BoundBox of a frame
+            [BoundBox(),BoundBox(),...]
+    '''
+    bestAnchorBoxFinder = BestAnchorBoxFinder([])
     
-#    CLASS    = len(boxes[0].classes)
-#    index_boxes = []   
-#    # suppress non-maximal boxes
-#    for c in range(CLASS):
-#        # extract class probabilities of the c^th class from multiple bbox
-#        class_probability_from_bbxs = [box.classes[c] for box in boxes]
+    CLASS    = len(boxes[0].classes)
+    index_boxes = []   
+    # suppress non-maximal boxes
+    for c in range(CLASS):
+        # extract class probabilities of the c^th class from multiple bbox
+        class_probability_from_bbxs = [box.classes[c] for box in boxes]
 
-#        #sorted_indices[i] contains the i^th largest class probabilities
-#        sorted_indices = list(reversed(np.argsort( class_probability_from_bbxs)))
+        #sorted_indices[i] contains the i^th largest class probabilities
+        sorted_indices = list(reversed(np.argsort( class_probability_from_bbxs)))
 
-#        for i in range(len(sorted_indices)):
-#            index_i = sorted_indices[i]
+        for i in range(len(sorted_indices)):
+            index_i = sorted_indices[i]
             
-#            # if class probability is zero then ignore
-#            if boxes[index_i].classes[c] == 0:  
-#                continue
-#            else:
-#                index_boxes.append(index_i)
-#                for j in range(i+1, len(sorted_indices)):
-#                    index_j = sorted_indices[j]
+            # if class probability is zero then ignore
+            if boxes[index_i].classes[c] == 0:  
+                continue
+            else:
+                index_boxes.append(index_i)
+                for j in range(i+1, len(sorted_indices)):
+                    index_j = sorted_indices[j]
                     
-#                    # check if the selected i^th bounding box has high IOU with any of the remaining bbox
-#                    # if so, the remaining bbox' class probabilities are set to 0.
-#                    bbox_iou = bestAnchorBoxFinder.bbox_iou(boxes[index_i], boxes[index_j])
-#                    if bbox_iou >= iou_threshold:
-#                        classes = boxes[index_j].classes
-#                        classes[c] = 0
-#                        boxes[index_j].set_class(classes)
+                    # check if the selected i^th bounding box has high IOU with any of the remaining bbox
+                    # if so, the remaining bbox' class probabilities are set to 0.
+                    bbox_iou = bestAnchorBoxFinder.bbox_iou(boxes[index_i], boxes[index_j])
+                    if bbox_iou >= iou_threshold:
+                        classes = boxes[index_j].classes
+                        classes[c] = 0
+                        boxes[index_j].set_class(classes)
                         
-#    newboxes = [ boxes[i] for i in index_boxes if boxes[i].get_score() > obj_threshold ]                
+    newboxes = [ boxes[i] for i in index_boxes if boxes[i].get_score() > obj_threshold ]                
     
-#    return newboxes
+    return newboxes
 
 def get_shifting_matrix(netout):
 
@@ -426,6 +426,61 @@ def find_high_class_prob_bbox(output, obj_threshold):
                         boxes.append(box)
 
     return(boxes)
+
+class BestAnchorBoxFinder(object):
+    def __init__(self, ANCHORS):
+        '''
+        ANCHORS: a np.array of even number length e.g.
+        
+        _ANCHORS = [4,2, ##  width=4, height=2,  flat large anchor box
+                    2,4, ##  width=2, height=4,  tall large anchor box
+                    1,1] ##  width=1, height=1,  small anchor box
+        '''
+        self.anchors = [BoundBox(0, 0, ANCHORS[2*i], ANCHORS[2*i+1]) 
+                        for i in range(int(len(ANCHORS)//2))]
+        
+    def _interval_overlap(self,interval_a, interval_b):
+        x1, x2 = interval_a
+        x3, x4 = interval_b
+        if x3 < x1:
+            if x4 < x1:
+                return 0
+            else:
+                return min(x2,x4) - x1
+        else:
+            if x2 < x3:
+                 return 0
+            else:
+                return min(x2,x4) - x3  
+
+    def bbox_iou(self,box1, box2):
+        intersect_w = self._interval_overlap([box1.xmin, box1.xmax], [box2.xmin, box2.xmax])
+        intersect_h = self._interval_overlap([box1.ymin, box1.ymax], [box2.ymin, box2.ymax])  
+
+        intersect = intersect_w * intersect_h
+
+        w1, h1 = box1.xmax-box1.xmin, box1.ymax-box1.ymin
+        w2, h2 = box2.xmax-box2.xmin, box2.ymax-box2.ymin
+
+        union = w1*h1 + w2*h2 - intersect
+
+        return float(intersect) / union
+    
+    def find(self,center_w, center_h):
+        # find the anchor that best predicts this box
+        best_anchor = -1
+        max_iou     = -1
+        # each Anchor box is specialized to have a certain shape.
+        # e.g., flat large rectangle, or small square
+        shifted_box = BoundBox(0, 0,center_w, center_h)
+        ##  For given object, find the best anchor box!
+        for i in range(len(self.anchors)): ## run through each anchor box
+            anchor = self.anchors[i]
+            iou    = self.bbox_iou(shifted_box, anchor)
+            if max_iou < iou:
+                best_anchor = i
+                max_iou     = iou
+        return(best_anchor,max_iou)  
 
 def main():
     model = Other_model()
@@ -476,7 +531,7 @@ def main():
                 
                 count += 1
 
-            if epoch % 10 == 0 and epoch != 0:
+            if epoch % 20 == 0 and epoch != 0:
                 generate_images(model, image, 0.015, 0.01)
 
 if __name__ == "__main__":
