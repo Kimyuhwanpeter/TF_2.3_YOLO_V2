@@ -8,10 +8,11 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import os
 import sys
+import cv2
 
-flags.DEFINE_string("tr_txt_path", "D:/[1]DB/[3]detection_DB/archive/100example_txt", "Training text path")
+flags.DEFINE_string("tr_txt_path", "D:/[1]DB/[3]detection_DB/PascalVoc2012/pascal_voc_2012/VOC2012/Annotations_text", "Training text path")
 
-flags.DEFINE_string("tr_img_path", "D:/[1]DB/[3]detection_DB/archive/images", "Training image path")
+flags.DEFINE_string("tr_img_path", "D:/[1]DB/[3]detection_DB/PascalVoc2012/pascal_voc_2012/VOC2012/JPEGImages", "Training image path")
 
 flags.DEFINE_integer("img_size", 416, "Image size (Original is 416, but to use pre-trained)")
 
@@ -38,7 +39,7 @@ ANCHORS = np.array(ANCHORS)
 ANCHORS_box = ANCHORS.reshape(len(ANCHORS) // 2, 2)
 ANCHORS = np.reshape(ANCHORS, [1,1,1,5,2])
 
-optim = tf.keras.optimizers.Adam(0.5e-4)
+optim = tf.keras.optimizers.Adam(0.5e-5)
 
 def func_(image, label):
 
@@ -72,23 +73,19 @@ def read_label(file, batch_size):
             if not line: break
             line = line.split('\n')[0]
 
-            xmin = (float(line.split(' ')[1]))
-            xmax = (float(line.split(' ')[2]))
-            ymin = (float(line.split(' ')[3]))
-            ymax = (float(line.split(' ')[4]))
-            #height = int(line.split(' ')[4])
-            #width = int(line.split(' ')[5])
-            classes = int(line.split(' ')[0])
+            xmin = (float(line.split(',')[0]))
+            xmax = (float(line.split(',')[2]))
+            ymin = (float(line.split(',')[1]))
+            ymax = (float(line.split(',')[3]))
+            height = int(line.split(',')[4])
+            width = int(line.split(',')[5])
+            classes = int(line.split(',')[6])
 
-            xmin = xmin * FLAGS.img_size
-            xmin = max(min(xmin, FLAGS.img_size), 0)
-            xmax = xmax * FLAGS.img_size
-            xmax = max(min(xmax, FLAGS.img_size), 0)
+            xmin = xmin
+            xmax = xmax
 
-            ymin = ymin * FLAGS.img_size
-            ymin = max(min(ymin, FLAGS.img_size), 0)
-            ymax = ymax * FLAGS.img_size
-            ymax = max(min(ymax, FLAGS.img_size), 0)
+            ymin = ymin
+            ymax = ymax
 
             if xmax > xmin and ymax > ymin:
                 x = (xmin + xmax) * 0.5
@@ -134,7 +131,7 @@ def grid_offset(grid_H, grid_W):
 
     coords = tf.tile(tf.concat([x, y], -1), [FLAGS.batch_size, 1, 1, 5, 1])
 
-    return coords
+    return(coords)
 
 def IOU(predict_box, label_box):
 
@@ -191,9 +188,9 @@ def cal_loss(model, images, labels):
         ####################################################################################
         # 박스 좌표 loss
         xy_loss = tf.reduce_sum(1 * I_obj * tf.square(
-            labels[:, :, :, :, 21:23] - predict_xy)) / (nI_obj + 1e-6)
+            labels[:, :, :, :, 21:23] - predict_xy)) / (nI_obj + 1e-6) / 2
         wh_loss = tf.reduce_sum(1 * I_obj * tf.square(
-            tf.sqrt(labels[:, :, :, :, 23:25]) - tf.sqrt(predict_wh))) / (nI_obj + 1e-6)
+            tf.sqrt(labels[:, :, :, :, 23:25]) - tf.sqrt(predict_wh))) / (nI_obj + 1e-6) / 2
         coord_loss = xy_loss + wh_loss  # 논문의 첫 번째 수식
         #print(coord_loss)
         #print("loss_xywh = {:4.3f}".format(coord_loss))
@@ -208,7 +205,7 @@ def cal_loss(model, images, labels):
         conf_mask = tf.cast(best_box < 0.6, tf.float32) * (1 - I_obj) * 1
         conf_mask = conf_mask + I_obj * 5
         nb_conf_mask = tf.reduce_sum(tf.cast(conf_mask > 0.0, tf.float32))
-        ob_loss = tf.reduce_sum(tf.square(I_obj - object_conf) * conf_mask) / (nb_conf_mask + 1e-6)
+        ob_loss = tf.reduce_sum(tf.square(I_obj - object_conf) * conf_mask) / (nb_conf_mask + 1e-6) / 2.
         #print(ob_loss)
         ####################################################################################
 
@@ -274,7 +271,6 @@ def generate_images(model, images, obj_threhold, iou_threshold):
     # https://www.maskaravivek.com/post/yolov2/
     logits = run_model(model, images, False)
 
-    offsets = tf.cast(grid_offset(FLAGS.output_size, FLAGS.output_size), tf.float32)
     # offset은 그대로 잘 되고 있음 --> offset 문제는 아니다
     for batch in range(FLAGS.batch_size):
         image = images[batch].numpy()
@@ -325,19 +321,25 @@ def generate_images(model, images, obj_threhold, iou_threshold):
             ymax = adjust_minmax(int(box.ymax * FLAGS.img_size), FLAGS.img_size)
 
             # 여기가 뭔가 이상하다... 학습은 되는데... 박스가 이상하게 생긴다..
-            rect = patches.Rectangle(
-                (xmin, ymin),
-                (xmax - xmin),
-                (ymax - ymin),
-                linewidth=1,
-                edgecolor="r",
-                facecolor="none",
-            )
+            cv2.rectangle(image, 
+                          pt1=(xmin,ymin), 
+                          pt2=(xmax,ymax), 
+                          color=(255,0,0), 
+                          thickness=3)
+            #rect = patches.Rectangle(
+            #    (xmin, ymin),
+            #    (xmax - xmin),
+            #    (ymax - ymin),
+            #    linewidth=1,
+            #    edgecolor="r",
+            #    facecolor="none",
+            #)
             # Add the patch to the Axes
-            ax.add_patch(rect)
+            #ax.add_patch(rect)
 
 
-        plt.show()
+        cv2.imshow("name", image)
+        cv2.waitKey(0)
 
 def nms_process(boxes, obj_threshold, iou_threshold):      # 이 부분 고쳐야한다.
 
@@ -529,10 +531,13 @@ def main():
                 if count % 10 == 0:
                     print("Epoch: {} [{}/{}] loss = {}".format(epoch, step + 1, batch_idx, loss))
                 
+                if count % 500 == 0 and count != 0:
+                    generate_images(model, image, 0.15, 0.5)
+
                 count += 1
 
-            if epoch % 20 == 0 and epoch != 0:
-                generate_images(model, image, 0.015, 0.01)
+            #if epoch % 1 == 0 and epoch != 0:
+            #generate_images(model, image, 0.2, 0.5)
 
 if __name__ == "__main__":
     main()
